@@ -1,14 +1,20 @@
 mod error;
+mod queue;
 
 use std::str::FromStr;
 
-use crate::document::{Document, Node, Text, TextFormat};
+use crate::{
+    document::{style_text, Document, Node, Style, Text, TextFragment},
+};
 
 use error::MdError;
+use queue::Queue;
+
+use self::queue::pop_min2;
 
 const RULE_CHARS: [char; 3] = ['*', '-', '_'];
 
-pub struct MarkDown(Document);
+pub struct MarkDown(pub Document);
 
 impl FromStr for MarkDown {
     type Err = MdError;
@@ -24,11 +30,97 @@ impl FromStr for MarkDown {
     }
 }
 
+// =============================================== TEXT ===============================================
+
 fn parse_text(line: &str) -> Result<Text, MdError> {
-    Ok(Text {
-        content: vec![TextFormat::Normal(line.to_owned())],
-    })
+    let mut asterisks = [Queue::new(), Queue::new(), Queue::new()];
+    let mut underscores = [Queue::new(), Queue::new(), Queue::new()];
+    let mut backticks = [Queue::new(), Queue::new(), Queue::new()];
+    let mut tildes = [Queue::new(), Queue::new(), Queue::new()];
+
+    let mut offset = 0;
+
+    let mut chars = line.chars().peekable();
+    loop {
+        if chars.peek().is_none() {
+            break;
+        }
+        push_prefixe_idx_in(&mut chars, &mut offset, '*', &mut asterisks);
+        push_prefixe_idx_in(&mut chars, &mut offset, '_', &mut underscores);
+        push_prefixe_idx_in(&mut chars, &mut offset, '`', &mut backticks);
+        push_prefixe_idx_in(&mut chars, &mut offset, '~', &mut tildes);
+
+        while let Some( c) = chars.peek() && !['*', '_', '`', '~'].contains(c) {
+            println!("'{c}'");
+            offset += c.len_utf8();
+            if *c == '\\' {
+                chars.next();
+            }
+            chars.next();
+        }
+    }
+
+    let mut buffers = [asterisks, underscores, backticks, tildes];
+    let mut content = vec![TextFragment::Stylised(Style::Normal, line.to_owned())];
+
+    while let Some(((start, end), (x, y))) = pop_min2(&mut buffers) {
+        match y {
+            // Asterisk * and underscore _
+            0 | 1 => match x {
+                0 => style_text(&mut content, x + 1, start, end, Style::Emphasis),
+                1 => style_text(&mut content, x + 1, start, end, Style::Strong),
+                2 => {
+                    style_text(
+                        &mut content,
+                        x + 1,
+                        start,
+                        end,
+                        Style::Emphasis | Style::Strong,
+                    );
+                }
+                _ => unreachable!(),
+            },
+            // Backtick `
+            2 => style_text(&mut content, x + 1, start, end, Style::Code),
+            // Tilde ~
+            3 if x == 1 => style_text(&mut content, x + 1, start, end, Style::Strikethrough),
+            _ => (),
+        }
+
+        println!("{content:?}")
+    }
+
+    Ok(Text { content })
 }
+
+use std::iter::Peekable;
+fn push_prefixe_idx_in(
+    text: &mut Peekable<impl Iterator<Item = char>>,
+    offset: &mut usize,
+    prefixe: char,
+    buffers: &mut [Queue<usize>; 3],
+) {
+    println!(" -> [{prefixe}], {offset}");
+    let mut occurence = 0;
+    let mut prefixe_offset = 0;
+    while let Some(c) = text.peek() && *c == prefixe {
+        occurence += 1;
+        prefixe_offset += c.len_utf8();
+
+        text.next();
+    }
+    println!(" {occurence}, {prefixe_offset}");
+
+    match occurence {
+        0 => (),
+        1 => buffers[0].push(*offset),
+        2 => buffers[1].push(*offset),
+        _ => buffers[2].push(*offset),
+    }
+    *offset += prefixe_offset;
+}
+
+// =============================================== LINE ===============================================
 
 fn parse_line(line: &str) -> Result<Node, MdError> {
     let line_trimed = line.trim();
@@ -86,7 +178,14 @@ fn try_parse_header(line: &str) -> Option<Result<Node, MdError>> {
 }
 
 fn try_parse_unordered_list(line: &str) -> Option<Result<Node, MdError>> {
-    if let Some(text) = line.strip_prefix("- ") {
+    todo!("Support indentation");
+
+    let text = line
+        .strip_prefix("- ")
+        .or(line.strip_prefix("+ "))
+        .or(line.strip_prefix("* "));
+
+    if let Some(text) = text {
         match parse_text(text) {
             Ok(text) => Some(Ok(Node::UnorderedList(text))),
             Err(e) => Some(Err(e)),
@@ -97,6 +196,8 @@ fn try_parse_unordered_list(line: &str) -> Option<Result<Node, MdError>> {
 }
 
 fn try_parse_ordered_list(line: &str) -> Option<Result<Node, MdError>> {
+    todo!("Support indentation");
+
     let text = line.trim_start_matches(char::is_numeric);
     if text.len() == line.len() {
         return None;
