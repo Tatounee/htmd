@@ -2,7 +2,7 @@ use bitflags::bitflags;
 
 #[derive(Debug)]
 pub struct Document {
-    pub text: Vec<Node>,
+    pub nodes: Vec<Node>,
 }
 
 #[derive(Debug)]
@@ -13,16 +13,70 @@ pub enum Node {
     H4(Text),
     H5(Text),
     Paragraphe(Text),
-    UnorderedList(Text),
-    OrderedList(u32, Text),
-    CodeBlock(String),
+    UnorderedList(usize, Text), // deepth
+    OrderedList(usize, Text),   // deepth
+    CodeBlock(CodeBlock),
     LineBreak,
     Rule,
 }
 
 #[derive(Debug)]
+pub struct CodeBlock {
+    pub language: String,
+    pub code: String,
+}
+
+pub fn compacte_nodes(nodes: Vec<Node>) -> Vec<Node> {
+    use Node::*;
+
+    let mut new_nodes = Vec::with_capacity(nodes.len());
+
+    let mut in_paragraphe = None;
+    let mut has_br = false;
+
+    for node in nodes {
+        if !matches!(node, Paragraphe(_)) && let Some(text) = in_paragraphe.take() {
+            new_nodes.push(Paragraphe(text))
+        }
+
+        if !matches!(node, LineBreak) {
+            has_br = false;
+        }
+
+        match node {
+            Paragraphe(text) => {
+                if let Some(p_text) = in_paragraphe.as_mut() {
+                    p_text.appendnl(text)
+                } else {
+                    in_paragraphe = Some(text)
+                }
+            }
+            LineBreak => {
+                if !has_br {
+                    new_nodes.push(node)
+                }
+            }
+            _ => new_nodes.push(node),
+        }
+    }
+
+    if let Some(text) = in_paragraphe.take() {
+        new_nodes.push(Paragraphe(text))
+    }
+
+    new_nodes
+}
+
+#[derive(Debug)]
 pub struct Text {
     pub content: Vec<TextFragment>,
+}
+impl Text {
+    fn appendnl(&mut self, mut text: Text) {
+        self.content
+            .push(TextFragment::Stylised(Style::Normal, "\n".to_owned()));
+        self.content.append(&mut text.content);
+    }
 }
 
 #[derive(Debug)]
@@ -62,10 +116,10 @@ impl TextFragment {
 
     pub fn style_in(self, start: usize, end: usize, prefixe_len: usize, style: Style) -> Vec<Self> {
         assert!(start <= end);
-        println!("<{start}, {end}> ~{prefixe_len}");
+        // println!("<{start}, {end}> ~{prefixe_len}");
 
         if let Self::Stylised(initial_style, s) = self {
-            println!("s = {s:?}");
+            // println!("s = {s:?}");
             if end > s.len() {
                 return Vec::new();
             }

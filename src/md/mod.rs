@@ -1,13 +1,9 @@
-mod error;
 mod queue;
 
 use std::str::FromStr;
 
-use crate::{
-    document::{style_text, Document, Node, Style, Text, TextFragment},
-};
+use crate::document::{style_text, CodeBlock, Document, Node, Style, Text, TextFragment, compacte_nodes};
 
-use error::MdError;
 use queue::Queue;
 
 use self::queue::pop_min2;
@@ -17,22 +13,26 @@ const RULE_CHARS: [char; 3] = ['*', '-', '_'];
 pub struct MarkDown(pub Document);
 
 impl FromStr for MarkDown {
-    type Err = MdError;
+    type Err = std::convert::Infallible;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let mut text = Vec::new();
+        let mut nodes = Vec::new();
 
+        let mut codeblock = None;
         for line in s.lines() {
-            text.push(parse_line(line)?);
+            if let Some(node) = parse_line(line, &mut codeblock) {
+                nodes.push(node);
+            }
         }
 
-        Ok(MarkDown(Document { text }))
+        let nodes = compacte_nodes(nodes);
+        Ok(MarkDown(Document { nodes }))
     }
 }
 
 // =============================================== TEXT ===============================================
 
-fn parse_text(line: &str) -> Result<Text, MdError> {
+fn parse_text(line: &str) -> Text {
     let mut asterisks = [Queue::new(), Queue::new(), Queue::new()];
     let mut underscores = [Queue::new(), Queue::new(), Queue::new()];
     let mut backticks = [Queue::new(), Queue::new(), Queue::new()];
@@ -51,7 +51,7 @@ fn parse_text(line: &str) -> Result<Text, MdError> {
         push_prefixe_idx_in(&mut chars, &mut offset, '~', &mut tildes);
 
         while let Some( c) = chars.peek() && !['*', '_', '`', '~'].contains(c) {
-            println!("'{c}'");
+            // println!("'{c}'");
             offset += c.len_utf8();
             if *c == '\\' {
                 chars.next();
@@ -87,10 +87,10 @@ fn parse_text(line: &str) -> Result<Text, MdError> {
             _ => (),
         }
 
-        println!("{content:?}")
+        // println!("{content:?}")
     }
 
-    Ok(Text { content })
+    Text { content }
 }
 
 use std::iter::Peekable;
@@ -100,7 +100,7 @@ fn push_prefixe_idx_in(
     prefixe: char,
     buffers: &mut [Queue<usize>; 3],
 ) {
-    println!(" -> [{prefixe}], {offset}");
+    // println!(" -> [{prefixe}], {offset}");
     let mut occurence = 0;
     let mut prefixe_offset = 0;
     while let Some(c) = text.peek() && *c == prefixe {
@@ -109,7 +109,7 @@ fn push_prefixe_idx_in(
 
         text.next();
     }
-    println!(" {occurence}, {prefixe_offset}");
+    // println!(" {occurence}, {prefixe_offset}");
 
     match occurence {
         0 => (),
@@ -122,37 +122,51 @@ fn push_prefixe_idx_in(
 
 // =============================================== LINE ===============================================
 
-fn parse_line(line: &str) -> Result<Node, MdError> {
-    let line_trimed = line.trim();
+fn parse_line(line: &str, codeblock: &mut Option<CodeBlock>) -> Option<Node> {
+    match codeblock {
+        Some(codeblock_inner) => {
+            if let Some(language) = is_code_block_annonce(line) && language.is_empty() {
+                Some(Node::CodeBlock(codeblock.take().unwrap()))
+            } else {
+                codeblock_inner.code.push_str(line);
+                codeblock_inner.code.push('\n');
+                None
+            }
+        }
+        None => {
+            if let Some(language) = is_code_block_annonce(line) {
+                *codeblock = Some(CodeBlock {language, code: String::new()});
+                return None;
+            }
 
-    if line_trimed.is_empty() {
-        return Ok(Node::LineBreak);
+            if line.trim().is_empty() {
+                return Some(Node::LineBreak);
+            }
+
+            if let Some(node) = try_parse_header(line) {
+                return Some(node);
+            }
+
+            if let Some(node) = try_parse_unordered_list(line) {
+                return Some(node);
+            }
+
+            if let Some(node) = try_parse_ordered_list(line) {
+                return Some(node);
+            }
+
+            if let Some(node) = try_parse_rule(line) {
+                return Some(node);
+            }
+
+            Some(Node::Paragraphe(parse_text(line)))
+        }
     }
-
-    if let Some(node) = try_parse_header(line_trimed) {
-        return node;
-    }
-
-    if let Some(node) = try_parse_unordered_list(line_trimed) {
-        return node;
-    }
-
-    if let Some(node) = try_parse_ordered_list(line_trimed) {
-        return node;
-    }
-
-    if let Some(node) = try_parse_code_block(line_trimed) {
-        return node;
-    }
-
-    if let Some(node) = try_parse_rule(line_trimed) {
-        return node;
-    }
-
-    Ok(Node::Paragraphe(parse_text(line)?))
 }
 
-fn try_parse_header(line: &str) -> Option<Result<Node, MdError>> {
+fn try_parse_header(line: &str) -> Option<Node> {
+    let line = line.trim();
+
     let text = line.trim_start_matches('#');
     if text.len() == line.len() {
         return None;
@@ -161,87 +175,96 @@ fn try_parse_header(line: &str) -> Option<Result<Node, MdError>> {
     if let Some(text) = text.strip_prefix(char::is_whitespace) {
         let hierachy = line.len() - text.len() - 1;
 
-        match parse_text(&line[hierachy + 1..]) {
-            Ok(text) => Some(Ok(match hierachy {
-                1 => Node::H1(text),
-                2 => Node::H2(text),
-                3 => Node::H3(text),
-                4 => Node::H4(text),
-                h if h >= 5 => Node::H5(text),
-                _ => unreachable!(),
-            })),
-            Err(e) => Some(Err(e)),
-        }
+        let text = parse_text(&line[hierachy + 1..]);
+        Some(match hierachy {
+            1 => Node::H1(text),
+            2 => Node::H2(text),
+            3 => Node::H3(text),
+            4 => Node::H4(text),
+            h if h >= 5 => Node::H5(text),
+            _ => unreachable!(),
+        })
     } else {
         None
     }
 }
 
-fn try_parse_unordered_list(line: &str) -> Option<Result<Node, MdError>> {
-    todo!("Support indentation");
+fn try_parse_unordered_list(line: &str) -> Option<Node> {
+    let deepth = calcule_deepth(line);
+    let line = line.trim();
 
     let text = line
         .strip_prefix("- ")
         .or(line.strip_prefix("+ "))
         .or(line.strip_prefix("* "));
 
-    if let Some(text) = text {
-        match parse_text(text) {
-            Ok(text) => Some(Ok(Node::UnorderedList(text))),
-            Err(e) => Some(Err(e)),
-        }
-    } else {
-        None
-    }
+    text.map(|text| Node::UnorderedList(deepth, parse_text(text)))
 }
 
-fn try_parse_ordered_list(line: &str) -> Option<Result<Node, MdError>> {
-    todo!("Support indentation");
+fn try_parse_ordered_list(line: &str) -> Option<Node> {
+    let deepth = calcule_deepth(line);
+    let line = line.trim();
 
     let text = line.trim_start_matches(char::is_numeric);
     if text.len() == line.len() {
         return None;
     }
 
-    if let Some(text) = text.strip_prefix(". ") {
-        let number = line[0..(line.len() - text.len() - 2)]
-            .parse::<u32>()
-            .unwrap();
-        match parse_text(text) {
-            Ok(text) => Some(Ok(Node::OrderedList(number, text))),
-            Err(e) => Some(Err(e)),
-        }
-    } else {
-        None
-    }
+    let text = text.strip_prefix(". ");
+
+    text.map(|text| Node::OrderedList(deepth, parse_text(text)))
 }
 
-fn try_parse_code_block(line: &str) -> Option<Result<Node, MdError>> {
+fn calcule_deepth(line: &str) -> usize {
+    let mut tab_occ = 0;
+    let mut space_occ = 0;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() && c.is_whitespace() {
+        if c == '\t' {
+            tab_occ += 1
+        } else {
+            space_occ += 1
+        }
+    }
+
+    tab_occ + (space_occ / 4)
+}
+
+fn is_code_block_annonce(line: &str) -> Option<String> {
+    let line = line.trim();
+
     let language = line.trim_start_matches('`');
 
     if line.len() - language.len() == 3 {
-        Some(Ok(Node::CodeBlock(language.to_owned())))
+        Some(language.to_owned())
     } else {
         None
     }
 }
 
-fn try_parse_rule(line: &str) -> Option<Result<Node, MdError>> {
+fn try_parse_rule(line: &str) -> Option<Node> {
+    let line = line.trim();
+
     let mut character = None;
     let mut char_occ = 0;
     for c in line.chars().filter(|c| !c.is_whitespace()) {
         match character {
             Some(character) if character == c => char_occ += 1,
-            Some(_) => return None,
-            None => {
+            None if RULE_CHARS.contains(&c) => {
                 character = Some(c);
                 char_occ += 1;
             }
+            _ => return None,
         }
     }
 
-    match character {
-        Some(character) if char_occ >= 3 && RULE_CHARS.contains(&character) => Some(Ok(Node::Rule)),
-        _ => None,
+    if character.is_some() && char_occ >= 3 {
+        Some(Node::Rule)
+    } else {
+        None
     }
+    // match character {
+    //     Some(character) if char_occ >= 3 && RULE_CHARS.contains(&character) => Some(Node::Rule),
+    //     _ => None,
+    // }
 }
