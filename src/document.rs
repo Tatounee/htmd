@@ -7,14 +7,9 @@ pub struct Document {
 
 #[derive(Debug)]
 pub enum Node {
-    H1(Text),
-    H2(Text),
-    H3(Text),
-    H4(Text),
-    H5(Text),
+    Header(usize, Text),
     Paragraphe(Text),
-    UnorderedList(usize, Text), // deepth
-    OrderedList(usize, Text),   // deepth
+    List(ListKind, Text),
     CodeBlock(CodeBlock),
     LineBreak,
     Rule,
@@ -24,6 +19,21 @@ pub enum Node {
 pub struct CodeBlock {
     pub language: String,
     pub code: String,
+}
+
+#[derive(Debug)]
+pub enum ListKind {
+    Oredred(usize),
+    Unordere(usize),
+}
+
+impl ListKind {
+    #[inline]
+    pub const fn deepth(&self) -> usize {
+        match self {
+            Self::Oredred(d) | Self::Unordere(d) => *d,
+        }
+    }
 }
 
 pub fn compacte_nodes(nodes: Vec<Node>) -> Vec<Node> {
@@ -53,8 +63,13 @@ pub fn compacte_nodes(nodes: Vec<Node>) -> Vec<Node> {
             }
             LineBreak => {
                 if !has_br {
-                    new_nodes.push(node)
+                    new_nodes.push(node);
+                    has_br = true;
                 }
+            }
+            Header(_, _) => {
+                has_br = true;
+                new_nodes.push(node)
             }
             _ => new_nodes.push(node),
         }
@@ -77,13 +92,63 @@ impl Text {
             .push(TextFragment::Stylised(Style::Normal, "\n".to_owned()));
         self.content.append(&mut text.content);
     }
+
+    pub fn style(&mut self, prefixe_len: usize, mut span: Span, style: Style) {
+        let modified_fragment = self.find_modified_fragment(&mut span);
+
+        if let Some(idx) = modified_fragment {
+            let text_fragment = self.content.remove(idx);
+            let new_fragment = text_fragment.style_in(span, prefixe_len, style);
+            for text_fragment in new_fragment.into_iter().rev() {
+                self.content.insert(idx, text_fragment)
+            }
+        }
+    }
+
+    pub fn replace(&mut self, mut span: Span, frag: TextFragment) {
+        let modified_fragment = self.find_modified_fragment(&mut span);
+
+        if let Some(idx) = modified_fragment {
+            let text_fragment = self.content.remove(idx);
+            let new_fragment = text_fragment.replace(span, frag);
+            for text_fragment in new_fragment.into_iter().rev() {
+                self.content.insert(idx, text_fragment)
+            }
+        }
+    }
+
+    pub fn remove(&mut self, mut span: Span) {
+        let modified_fragment = self.find_modified_fragment(&mut span);
+
+        if let Some(idx) = modified_fragment {
+            let text_fragment = self.content.remove(idx);
+            let new_fragment = text_fragment.remove(span);
+            for text_fragment in new_fragment.into_iter().rev() {
+                self.content.insert(idx, text_fragment)
+            }
+        }
+    }
+
+    fn find_modified_fragment(&mut self, span: &mut Span) -> Option<usize> {
+        let mut offset = 0;
+        let mut replaced_fragment = None;
+        for (idx, text_fragment) in self.content.iter_mut().enumerate() {
+            if span.offset < text_fragment.len() + offset {
+                replaced_fragment = Some(idx);
+                span.offset -= offset;
+                break;
+            }
+            offset += text_fragment.len()
+        }
+        replaced_fragment
+    }
 }
 
 #[derive(Debug)]
 pub enum TextFragment {
     Stylised(Style, String),
-    Link(String, String),
-    Image(String, String),
+    Link(String, String),  // alt, link
+    Image(String, String), // alt, path
 }
 
 impl Default for TextFragment {
@@ -114,33 +179,28 @@ impl TextFragment {
         }
     }
 
-    pub fn style_in(self, start: usize, end: usize, prefixe_len: usize, style: Style) -> Vec<Self> {
-        assert!(start <= end);
-        // println!("<{start}, {end}> ~{prefixe_len}");
-
-        if let Self::Stylised(initial_style, s) = self {
-            // println!("s = {s:?}");
-            if end > s.len() {
-                return Vec::new();
+    pub fn style_in(self, span: Span, prefixe_len: usize, style: Style) -> Vec<Self> {
+        if let Self::Stylised(initial_style, s) = &self {
+            if span.offset + span.length > s.len() {
+                return vec![self];
             }
 
-            let (left_part, s) = s.split_at(start);
+            let (left_part, s) = s.split_at(span.offset);
             let (left_modifier, s) = s.split_at(prefixe_len);
 
-            let (middle_part, s) = s.split_at(end - start - prefixe_len);
+            let (middle_part, s) = s.split_at(span.length - prefixe_len);
             let (right_modifier, right_part) = s.split_at(prefixe_len);
-            // let right_part = &s[prefixe_len..];
 
             let mut texts = Vec::with_capacity(3);
             if !left_part.is_empty() {
-                texts.push(Self::Stylised(initial_style, left_part.to_owned()))
+                texts.push(Self::Stylised(*initial_style, left_part.to_owned()))
             }
             if !left_modifier.is_empty() {
                 texts.push(Self::Stylised(Style::Modifier, left_modifier.to_owned()))
             }
             if !middle_part.is_empty() {
                 texts.push(Self::Stylised(
-                    initial_style | style,
+                    *initial_style | style,
                     middle_part.to_owned(),
                 ))
             }
@@ -148,7 +208,7 @@ impl TextFragment {
                 texts.push(Self::Stylised(Style::Modifier, right_modifier.to_owned()))
             }
             if !right_part.is_empty() {
-                texts.push(Self::Stylised(initial_style, right_part.to_owned()))
+                texts.push(Self::Stylised(*initial_style, right_part.to_owned()))
             }
 
             texts
@@ -156,34 +216,56 @@ impl TextFragment {
             panic!("Try to style unstylasible TextFormat with {style:?} in {self:?}")
         }
     }
-}
 
-pub fn style_text(
-    text: &mut Vec<TextFragment>,
-    prefixe_len: usize,
-    mut start: usize,
-    mut end: usize,
-    style: Style,
-) {
-    assert!(start <= end);
+    fn replace(self, span: Span, frag: TextFragment) -> Vec<Self> {
+        if let Self::Stylised(initial_style, s) = &self {
+            if span.offset + span.length > s.len() {
+                return vec![self];
+            }
 
-    let mut offset = 0;
-    let mut replaced_fragment = None;
-    for (idx, text_fragment) in text.iter_mut().enumerate() {
-        if start < text_fragment.len() + offset {
-            replaced_fragment = Some(idx);
-            start -= offset;
-            end -= offset;
-            break;
+            let (left_part, s) = s.split_at(span.offset);
+            let (_, right_part) = s.split_at(span.length);
+
+            vec![
+                Self::Stylised(*initial_style, left_part.to_owned()),
+                frag,
+                Self::Stylised(*initial_style, right_part.to_owned()),
+            ]
+        } else {
+            panic!("Try to replace unreplacable TextFormat with {frag:?} in {self:?}")
         }
-        offset += text_fragment.len()
     }
 
-    if let Some(idx) = replaced_fragment {
-        let text_fragment = text.remove(idx);
-        let new_fragment = text_fragment.style_in(start, end, prefixe_len, style);
-        for text_fragment in new_fragment.into_iter().rev() {
-            text.insert(idx, text_fragment)
+    fn remove(self, span: Span) -> Vec<Self> {
+        if let Self::Stylised(initial_style, s) = &self {
+            if span.offset + span.length > s.len() {
+                return vec![self];
+            }
+
+            let (left_part, s) = s.split_at(span.offset);
+            let (_, right_part) = s.split_at(span.length);
+
+            vec![
+                Self::Stylised(*initial_style, left_part.to_owned()),
+                Self::Stylised(*initial_style, right_part.to_owned()),
+            ]
+        } else {
+            panic!("Try to remove unexisting text")
+        }
+    }
+}
+
+pub struct Span {
+    pub offset: usize,
+    pub length: usize,
+}
+
+impl Span {
+    pub fn from_start_end(start: usize, end: usize) -> Self {
+        assert!(start <= end);
+        Self {
+            offset: start,
+            length: end - start,
         }
     }
 }

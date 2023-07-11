@@ -2,7 +2,9 @@ mod queue;
 
 use std::str::FromStr;
 
-use crate::document::{style_text, CodeBlock, Document, Node, Style, Text, TextFragment, compacte_nodes};
+use crate::document::{
+    compacte_nodes, CodeBlock, Document, ListKind, Node, Span, Style, Text, TextFragment,
+};
 
 use queue::Queue;
 
@@ -38,6 +40,9 @@ fn parse_text(line: &str) -> Text {
     let mut backticks = [Queue::new(), Queue::new(), Queue::new()];
     let mut tildes = [Queue::new(), Queue::new(), Queue::new()];
 
+    let mut links_images = Vec::new();
+    let mut escaped = Vec::new();
+
     let mut offset = 0;
 
     let mut chars = line.chars().peekable();
@@ -45,15 +50,18 @@ fn parse_text(line: &str) -> Text {
         if chars.peek().is_none() {
             break;
         }
-        push_prefixe_idx_in(&mut chars, &mut offset, '*', &mut asterisks);
-        push_prefixe_idx_in(&mut chars, &mut offset, '_', &mut underscores);
-        push_prefixe_idx_in(&mut chars, &mut offset, '`', &mut backticks);
-        push_prefixe_idx_in(&mut chars, &mut offset, '~', &mut tildes);
+
+        try_push_link_image_in(&mut chars, &mut offset, &mut links_images);
+
+        try_push_prefixe_idx_in(&mut chars, &mut offset, '*', &mut asterisks);
+        try_push_prefixe_idx_in(&mut chars, &mut offset, '_', &mut underscores);
+        try_push_prefixe_idx_in(&mut chars, &mut offset, '`', &mut backticks);
+        try_push_prefixe_idx_in(&mut chars, &mut offset, '~', &mut tildes);
 
         while let Some( c) = chars.peek() && !['*', '_', '`', '~'].contains(c) {
-            // println!("'{c}'");
             offset += c.len_utf8();
             if *c == '\\' {
+                escaped.push(offset - c.len_utf8());
                 chars.next();
             }
             chars.next();
@@ -61,46 +69,130 @@ fn parse_text(line: &str) -> Text {
     }
 
     let mut buffers = [asterisks, underscores, backticks, tildes];
-    let mut content = vec![TextFragment::Stylised(Style::Normal, line.to_owned())];
+    let mut text = Text {
+        content: vec![TextFragment::Stylised(Style::Normal, line.to_owned())],
+    };
 
     while let Some(((start, end), (x, y))) = pop_min2(&mut buffers) {
+        let span = Span::from_start_end(start, end);
         match y {
             // Asterisk * and underscore _
             0 | 1 => match x {
-                0 => style_text(&mut content, x + 1, start, end, Style::Emphasis),
-                1 => style_text(&mut content, x + 1, start, end, Style::Strong),
+                0 => text.style(x + 1, span, Style::Emphasis),
+                1 => text.style(x + 1, span, Style::Strong),
                 2 => {
-                    style_text(
-                        &mut content,
-                        x + 1,
-                        start,
-                        end,
-                        Style::Emphasis | Style::Strong,
-                    );
+                    text.style(x + 1, span, Style::Emphasis | Style::Strong);
                 }
                 _ => unreachable!(),
             },
             // Backtick `
-            2 => style_text(&mut content, x + 1, start, end, Style::Code),
+            2 => text.style(x + 1, span, Style::Code),
             // Tilde ~
-            3 if x == 1 => style_text(&mut content, x + 1, start, end, Style::Strikethrough),
+            3 if x == 1 => text.style(x + 1, span, Style::Strikethrough),
             _ => (),
         }
-
-        // println!("{content:?}")
     }
 
-    Text { content }
+    for (span, frag) in links_images {
+        text.replace(span, frag)
+    }
+
+    for escape_char in escaped {
+        text.remove(Span {
+            offset: escape_char,
+            length: 1,
+        })
+    }
+
+    text
 }
 
 use std::iter::Peekable;
-fn push_prefixe_idx_in(
+fn try_push_link_image_in(
+    text: &mut Peekable<impl Iterator<Item = char> + Clone>,
+    offset: &mut usize,
+    buffer: &mut Vec<(Span, TextFragment)>,
+) {
+    let c = text.peek().cloned();
+    if c.is_none() || !['!', '['].contains(&c.unwrap()) {
+        return;
+    }
+
+    let mut text_cloned = text.clone();
+    let mut link_offset = 0;
+
+    let is_image = c.unwrap() == '!';
+    if is_image {
+        text_cloned.next();
+        link_offset += '!'.len_utf8();
+    }
+
+    // First '['
+    if let Some(c) = text_cloned.next() && c == '[' {
+        link_offset += '['.len_utf8();
+    } else {
+        return;
+    }
+
+    // Alt
+    let mut alt = String::new();
+    let mut succes = false;
+    for c in text_cloned.by_ref() {
+        link_offset += c.len_utf8();
+        if c != ']' {
+            alt.push(c);
+        } else {
+            succes = true;
+            break;
+        }
+    }
+    if !succes {
+        return;
+    }
+
+    // First '('
+    if let Some(c) = text_cloned.next() && c == '(' {
+        link_offset += '('.len_utf8();
+    } else {
+        return;
+    }
+
+    // link
+    let mut link = String::new();
+    let mut succes = false;
+    for c in text_cloned.by_ref() {
+        link_offset += c.len_utf8();
+        if c != ')' {
+            link.push(c);
+        } else {
+            succes = true;
+            break;
+        }
+    }
+    if !succes {
+        return;
+    }
+
+    // "Return"
+    let span = Span {
+        offset: *offset,
+        length: link_offset,
+    };
+    if is_image {
+        buffer.push((span, TextFragment::Image(alt, link)))
+    } else {
+        buffer.push((span, TextFragment::Link(alt, link)))
+    }
+    *text = text_cloned;
+    *offset += link_offset;
+}
+
+fn try_push_prefixe_idx_in(
     text: &mut Peekable<impl Iterator<Item = char>>,
     offset: &mut usize,
     prefixe: char,
     buffers: &mut [Queue<usize>; 3],
 ) {
-    // println!(" -> [{prefixe}], {offset}");
     let mut occurence = 0;
     let mut prefixe_offset = 0;
     while let Some(c) = text.peek() && *c == prefixe {
@@ -109,7 +201,6 @@ fn push_prefixe_idx_in(
 
         text.next();
     }
-    // println!(" {occurence}, {prefixe_offset}");
 
     match occurence {
         0 => (),
@@ -176,14 +267,7 @@ fn try_parse_header(line: &str) -> Option<Node> {
         let hierachy = line.len() - text.len() - 1;
 
         let text = parse_text(&line[hierachy + 1..]);
-        Some(match hierachy {
-            1 => Node::H1(text),
-            2 => Node::H2(text),
-            3 => Node::H3(text),
-            4 => Node::H4(text),
-            h if h >= 5 => Node::H5(text),
-            _ => unreachable!(),
-        })
+        Some(Node::Header(hierachy.min(5), text))
     } else {
         None
     }
@@ -198,7 +282,7 @@ fn try_parse_unordered_list(line: &str) -> Option<Node> {
         .or(line.strip_prefix("+ "))
         .or(line.strip_prefix("* "));
 
-    text.map(|text| Node::UnorderedList(deepth, parse_text(text)))
+    text.map(|text| Node::List(ListKind::Unordere(deepth), parse_text(text)))
 }
 
 fn try_parse_ordered_list(line: &str) -> Option<Node> {
@@ -212,7 +296,7 @@ fn try_parse_ordered_list(line: &str) -> Option<Node> {
 
     let text = text.strip_prefix(". ");
 
-    text.map(|text| Node::OrderedList(deepth, parse_text(text)))
+    text.map(|text| Node::List(ListKind::Oredred(deepth), parse_text(text)))
 }
 
 fn calcule_deepth(line: &str) -> usize {
