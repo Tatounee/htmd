@@ -1,7 +1,5 @@
 mod queue;
 
-use std::str::FromStr;
-
 use crate::document::{
     compacte_nodes, CodeBlock, Document, ListKind, Node, Span, Style, Text, TextFragment,
 };
@@ -12,23 +10,31 @@ use self::queue::pop_min2;
 
 const RULE_CHARS: [char; 3] = ['*', '-', '_'];
 
-pub struct MarkDown(pub Document);
+pub struct MarkDown<'a>(pub Document<'a>);
 
-impl FromStr for MarkDown {
-    type Err = std::convert::Infallible;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+impl<'a> From<&'a str> for MarkDown<'a> {
+    fn from(s: &'a str) -> Self {
         let mut nodes = Vec::new();
 
         let mut codeblock = None;
-        for line in s.lines() {
-            if let Some(node) = parse_line(line, &mut codeblock) {
-                nodes.push(node);
+        let mut pre_offset = 0;
+        let mut chars_indices = s.char_indices();
+        while let Some((_, c)) = chars_indices.next() {
+            if c == '\n' {
+                let line = &s[pre_offset..chars_indices.offset() - 1];
+                if let Some(node) = parse_line(s, pre_offset, line, &mut codeblock) {
+                    nodes.push(node);
+                }
+                pre_offset = chars_indices.offset();
             }
+        }
+        let line = &s[pre_offset..chars_indices.offset()];
+        if let Some(node) = parse_line(s, pre_offset, line, &mut codeblock) {
+            nodes.push(node);
         }
 
         let nodes = compacte_nodes(nodes);
-        Ok(MarkDown(Document { nodes }))
+        MarkDown(Document { nodes })
     }
 }
 
@@ -51,7 +57,7 @@ fn parse_text(line: &str) -> Text {
             break;
         }
 
-        try_push_link_image_in(&mut chars, &mut offset, &mut links_images);
+        try_push_link_image_in(line, &mut chars, &mut offset, &mut links_images);
 
         try_push_prefixe_idx_in(&mut chars, &mut offset, '*', &mut asterisks);
         try_push_prefixe_idx_in(&mut chars, &mut offset, '_', &mut underscores);
@@ -70,7 +76,7 @@ fn parse_text(line: &str) -> Text {
 
     let mut buffers = [asterisks, underscores, backticks, tildes];
     let mut text = Text {
-        content: vec![TextFragment::Stylised(Style::Normal, line.to_owned())],
+        content: vec![TextFragment::Stylised(Style::Normal, line)],
     };
 
     while let Some(((start, end), (x, y))) = pop_min2(&mut buffers) {
@@ -98,20 +104,18 @@ fn parse_text(line: &str) -> Text {
     }
 
     for escape_char in escaped {
-        text.remove(Span {
-            offset: escape_char,
-            length: 1,
-        })
+        text.remove(Span::new(escape_char, 1))
     }
 
     text
 }
 
 use std::iter::Peekable;
-fn try_push_link_image_in(
+fn try_push_link_image_in<'a>(
+    line: &'a str,
     text: &mut Peekable<impl Iterator<Item = char> + Clone>,
     offset: &mut usize,
-    buffer: &mut Vec<(Span, TextFragment)>,
+    buffer: &mut Vec<(Span, TextFragment<'a>)>,
 ) {
     let c = text.peek().cloned();
     if c.is_none() || !['!', '['].contains(&c.unwrap()) {
@@ -135,12 +139,13 @@ fn try_push_link_image_in(
     }
 
     // Alt
-    let mut alt = String::new();
+    // let mut alt = "";
+    let mut alt_span = Span::new(*offset + link_offset, 0);
     let mut succes = false;
     for c in text_cloned.by_ref() {
         link_offset += c.len_utf8();
         if c != ']' {
-            alt.push(c);
+            alt_span.extend(c.len_utf8())
         } else {
             succes = true;
             break;
@@ -149,6 +154,7 @@ fn try_push_link_image_in(
     if !succes {
         return;
     }
+    let alt = alt_span.fetch(line).unwrap();
 
     // First '('
     if let Some(c) = text_cloned.next() && c == '(' {
@@ -157,13 +163,13 @@ fn try_push_link_image_in(
         return;
     }
 
-    // link
-    let mut link = String::new();
+    // Link
+    let mut link_span = Span::new(*offset + link_offset, 0);
     let mut succes = false;
     for c in text_cloned.by_ref() {
         link_offset += c.len_utf8();
         if c != ')' {
-            link.push(c);
+            link_span.extend(c.len_utf8())
         } else {
             succes = true;
             break;
@@ -172,12 +178,10 @@ fn try_push_link_image_in(
     if !succes {
         return;
     }
+    let link = link_span.fetch(line).unwrap();
 
     // "Return"
-    let span = Span {
-        offset: *offset,
-        length: link_offset,
-    };
+    let span = Span::new(*offset, link_offset);
     if is_image {
         buffer.push((span, TextFragment::Image(alt, link)))
     } else {
@@ -213,20 +217,28 @@ fn try_push_prefixe_idx_in(
 
 // =============================================== LINE ===============================================
 
-fn parse_line(line: &str, codeblock: &mut Option<CodeBlock>) -> Option<Node> {
+fn parse_line<'a>(
+    s: &'a str,
+    offset: usize,
+    line: &'a str,
+    codeblock: &mut Option<CodeBlock<'a>>,
+) -> Option<Node<'a>> {
     match codeblock {
         Some(codeblock_inner) => {
             if let Some(language) = is_code_block_annonce(line) && language.is_empty() {
                 Some(Node::CodeBlock(codeblock.take().unwrap()))
             } else {
-                codeblock_inner.code.push_str(line);
-                codeblock_inner.code.push('\n');
+                codeblock_inner.code.extend(line.len() + 1);
                 None
             }
         }
         None => {
             if let Some(language) = is_code_block_annonce(line) {
-                *codeblock = Some(CodeBlock {language, code: String::new()});
+                *codeblock = Some(CodeBlock::new(
+                    s,
+                    language,
+                    Span::new(offset + line.len() + 1, 0),
+                ));
                 return None;
             }
 
@@ -314,13 +326,13 @@ fn calcule_deepth(line: &str) -> usize {
     tab_occ + (space_occ / 4)
 }
 
-fn is_code_block_annonce(line: &str) -> Option<String> {
+fn is_code_block_annonce(line: &str) -> Option<&str> {
     let line = line.trim();
 
     let language = line.trim_start_matches('`');
 
     if line.len() - language.len() == 3 {
-        Some(language.to_owned())
+        Some(language)
     } else {
         None
     }
@@ -347,8 +359,4 @@ fn try_parse_rule(line: &str) -> Option<Node> {
     } else {
         None
     }
-    // match character {
-    //     Some(character) if char_occ >= 3 && RULE_CHARS.contains(&character) => Some(Node::Rule),
-    //     _ => None,
-    // }
 }

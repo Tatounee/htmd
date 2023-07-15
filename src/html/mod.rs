@@ -1,19 +1,19 @@
 use std::fmt;
 
 use crate::{
-    document::{CodeBlock, Document, ListKind, Node, Style, Text, TextFragment},
+    document::{Document, ListKind, Node, Style, Text, TextFragment},
     md::MarkDown,
 };
 
-pub struct HTML(pub Document);
+pub struct HTML<'a>(pub Document<'a>);
 
-impl From<MarkDown> for HTML {
-    fn from(markdown: MarkDown) -> Self {
+impl<'a> From<MarkDown<'a>> for HTML<'a> {
+    fn from(markdown: MarkDown<'a>) -> Self {
         Self(markdown.0)
     }
 }
 
-impl fmt::Display for HTML {
+impl<'a> fmt::Display for HTML<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut lists: Vec<&ListKind> = Vec::new();
 
@@ -21,15 +21,17 @@ impl fmt::Display for HTML {
             let mut reset_list = true;
             match line {
                 Node::Header(level, text) => f.write_fmt(format_args!(
-                    "<h{level}>{}</h{level}>\n",
+                    "<h{level}>{}</h{level}>",
                     text_to_htlm(text)
                 ))?,
                 Node::Paragraphe(text) => f.write_fmt(format_args!(
-                    "<p>{}</p>\n",
+                    "<p>{}</p>",
                     text_to_htlm(text).replace('\n', "<br>")
                 ))?,
-                Node::CodeBlock(CodeBlock { language, code }) => f.write_fmt(format_args!(
-                    "<pre><code class={language}>{code}</code></pre>\n"
+                Node::CodeBlock(codeblock) => f.write_fmt(format_args!(
+                    "<pre><code class={}>{}</code></pre>",
+                    codeblock.language,
+                    codeblock.fetch().unwrap()
                 ))?,
                 Node::List(list_kind, text) => {
                     reset_list = false;
@@ -57,8 +59,8 @@ impl fmt::Display for HTML {
                         _ => unreachable!(),
                     }
                 }
-                Node::LineBreak => f.write_str("<br>\n")?,
-                Node::Rule => f.write_str("<hr>\n")?,
+                Node::LineBreak => f.write_str("<br>")?,
+                Node::Rule => f.write_str("<hr>")?,
             }
 
             if reset_list {
@@ -75,10 +77,10 @@ impl fmt::Display for HTML {
 fn init_list_html(list_kind: &ListKind, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
     match list_kind {
         ListKind::Oredred(_) => {
-            f.write_str("<ol>\n")?;
+            f.write_str("<ol>")?;
         }
         ListKind::Unordere(_) => {
-            f.write_str("<ul>\n")?;
+            f.write_str("<ul>")?;
         }
     };
     Ok(())
@@ -87,10 +89,10 @@ fn init_list_html(list_kind: &ListKind, f: &mut fmt::Formatter<'_>) -> Result<()
 fn end_list_html(list_kind: &ListKind, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
     match list_kind {
         ListKind::Oredred(_) => {
-            f.write_str("</ol>\n")?;
+            f.write_str("</ol>")?;
         }
         ListKind::Unordere(_) => {
-            f.write_str("</ul>\n")?;
+            f.write_str("</ul>")?;
         }
     };
     Ok(())

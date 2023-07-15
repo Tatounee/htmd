@@ -1,24 +1,35 @@
 use bitflags::bitflags;
 
 #[derive(Debug)]
-pub struct Document {
-    pub nodes: Vec<Node>,
+pub struct Document<'a> {
+    pub nodes: Vec<Node<'a>>,
 }
 
 #[derive(Debug)]
-pub enum Node {
-    Header(usize, Text),
-    Paragraphe(Text),
-    List(ListKind, Text),
-    CodeBlock(CodeBlock),
+pub enum Node<'a> {
+    Header(usize, Text<'a>),
+    Paragraphe(Text<'a>),
+    List(ListKind, Text<'a>),
+    CodeBlock(CodeBlock<'a>),
     LineBreak,
     Rule,
 }
 
 #[derive(Debug)]
-pub struct CodeBlock {
-    pub language: String,
-    pub code: String,
+pub struct CodeBlock<'a> {
+    s: &'a str,
+    pub language: &'a str,
+    pub code: Span,
+}
+
+impl<'a> CodeBlock<'a> {
+    pub fn new(s: &'a str, language: &'a str, code: Span) -> Self {
+        Self { s, language, code }
+    }
+
+    pub fn fetch(&self) -> Option<&'a str> {
+        self.code.fetch(self.s)
+    }
 }
 
 #[derive(Debug)]
@@ -83,13 +94,13 @@ pub fn compacte_nodes(nodes: Vec<Node>) -> Vec<Node> {
 }
 
 #[derive(Debug)]
-pub struct Text {
-    pub content: Vec<TextFragment>,
+pub struct Text<'a> {
+    pub content: Vec<TextFragment<'a>>,
 }
-impl Text {
-    fn appendnl(&mut self, mut text: Text) {
+impl<'a> Text<'a> {
+    fn appendnl(&mut self, mut text: Text<'a>) {
         self.content
-            .push(TextFragment::Stylised(Style::Normal, "\n".to_owned()));
+            .push(TextFragment::Stylised(Style::Normal, "\n"));
         self.content.append(&mut text.content);
     }
 
@@ -105,7 +116,7 @@ impl Text {
         }
     }
 
-    pub fn replace(&mut self, mut span: Span, frag: TextFragment) {
+    pub fn replace(&mut self, mut span: Span, frag: TextFragment<'a>) {
         let modified_fragment = self.find_modified_fragment(&mut span);
 
         if let Some(idx) = modified_fragment {
@@ -145,15 +156,15 @@ impl Text {
 }
 
 #[derive(Debug)]
-pub enum TextFragment {
-    Stylised(Style, String),
-    Link(String, String),  // alt, link
-    Image(String, String), // alt, path
+pub enum TextFragment<'a> {
+    Stylised(Style, &'a str),
+    Link(&'a str, &'a str),  // alt, link
+    Image(&'a str, &'a str), // alt, path
 }
 
-impl Default for TextFragment {
+impl<'a> Default for TextFragment<'a> {
     fn default() -> Self {
-        Self::Stylised(Style::Normal, String::new())
+        Self::Stylised(Style::Normal, "")
     }
 }
 
@@ -170,7 +181,7 @@ bitflags! {
     }
 }
 
-impl TextFragment {
+impl<'a> TextFragment<'a> {
     pub fn len(&self) -> usize {
         use TextFragment::*;
         match self {
@@ -193,22 +204,19 @@ impl TextFragment {
 
             let mut texts = Vec::with_capacity(3);
             if !left_part.is_empty() {
-                texts.push(Self::Stylised(*initial_style, left_part.to_owned()))
+                texts.push(Self::Stylised(*initial_style, left_part))
             }
             if !left_modifier.is_empty() {
-                texts.push(Self::Stylised(Style::Modifier, left_modifier.to_owned()))
+                texts.push(Self::Stylised(Style::Modifier, left_modifier))
             }
             if !middle_part.is_empty() {
-                texts.push(Self::Stylised(
-                    *initial_style | style,
-                    middle_part.to_owned(),
-                ))
+                texts.push(Self::Stylised(*initial_style | style, middle_part))
             }
             if !right_modifier.is_empty() {
-                texts.push(Self::Stylised(Style::Modifier, right_modifier.to_owned()))
+                texts.push(Self::Stylised(Style::Modifier, right_modifier))
             }
             if !right_part.is_empty() {
-                texts.push(Self::Stylised(*initial_style, right_part.to_owned()))
+                texts.push(Self::Stylised(*initial_style, right_part))
             }
 
             texts
@@ -217,7 +225,7 @@ impl TextFragment {
         }
     }
 
-    fn replace(self, span: Span, frag: TextFragment) -> Vec<Self> {
+    fn replace(self, span: Span, frag: TextFragment<'a>) -> Vec<Self> {
         if let Self::Stylised(initial_style, s) = &self {
             if span.offset + span.length > s.len() {
                 return vec![self];
@@ -227,9 +235,9 @@ impl TextFragment {
             let (_, right_part) = s.split_at(span.length);
 
             vec![
-                Self::Stylised(*initial_style, left_part.to_owned()),
+                Self::Stylised(*initial_style, left_part),
                 frag,
-                Self::Stylised(*initial_style, right_part.to_owned()),
+                Self::Stylised(*initial_style, right_part),
             ]
         } else {
             panic!("Try to replace unreplacable TextFormat with {frag:?} in {self:?}")
@@ -246,8 +254,8 @@ impl TextFragment {
             let (_, right_part) = s.split_at(span.length);
 
             vec![
-                Self::Stylised(*initial_style, left_part.to_owned()),
-                Self::Stylised(*initial_style, right_part.to_owned()),
+                Self::Stylised(*initial_style, left_part),
+                Self::Stylised(*initial_style, right_part),
             ]
         } else {
             panic!("Try to remove unexisting text")
@@ -255,17 +263,34 @@ impl TextFragment {
     }
 }
 
+#[derive(Debug)]
 pub struct Span {
     pub offset: usize,
     pub length: usize,
 }
 
 impl Span {
+    pub fn new(offset: usize, length: usize) -> Self {
+        Self { offset, length }
+    }
+
     pub fn from_start_end(start: usize, end: usize) -> Self {
         assert!(start <= end);
         Self {
             offset: start,
             length: end - start,
+        }
+    }
+
+    pub fn extend(&mut self, len: usize) {
+        self.length += len
+    }
+
+    pub fn fetch<'a>(&self, s: &'a str) -> Option<&'a str> {
+        if self.offset + self.length <= s.len() {
+            Some(&s[self.offset..self.offset + self.length])
+        } else {
+            None
         }
     }
 }
