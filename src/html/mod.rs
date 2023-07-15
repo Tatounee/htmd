@@ -20,10 +20,9 @@ impl<'a> fmt::Display for HTML<'a> {
         for line in self.0.nodes.iter() {
             let mut reset_list = true;
             match line {
-                Node::Header(level, text) => f.write_fmt(format_args!(
-                    "<h{level}>{}</h{level}>",
-                    text_to_htlm(text)
-                ))?,
+                Node::Header(level, text) => {
+                    f.write_fmt(format_args!("<h{level}>{}</h{level}>", text_to_htlm(text)))?
+                }
                 Node::Paragraphe(text) => f.write_fmt(format_args!(
                     "<p>{}</p>",
                     text_to_htlm(text).replace('\n', "<br>")
